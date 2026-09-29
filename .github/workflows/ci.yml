@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: linux-${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: gcc
+            cxx: g++
+          - name: clang
+            cxx: clang++
+    env:
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Configure
+        run: cmake --preset dev-debug
+      - name: Build
+        run: cmake --build --preset dev-debug --parallel
+      - name: Run executable stubs
+        run: |
+          ./build/dev-debug/bin/pulse-server
+          ./build/dev-debug/bin/pulse-client
+
+  windows:
+    name: windows-msvc
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Configure
+        run: cmake -S . -B build/ci-windows -G "Visual Studio 17 2022" -A x64
+      - name: Build
+        run: cmake --build build/ci-windows --config Debug --parallel
+      - name: Run server stub
+        run: .\build\ci-windows\bin\Debug\pulse-server.exe
+      - name: Run client stub
+        run: .\build\ci-windows\bin\Debug\pulse-client.exe
+
+  formatting:
+    name: formatting
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install formatter
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang-format-18
+      - name: Check C++ formatting
+        shell: bash
+        run: git ls-files -z '*.cpp' '*.hpp' '*.h' | xargs -0 -r clang-format-18 --dry-run --Werror
