@@ -193,19 +193,19 @@ TEST_CASE("Required envelope fields reject missing and incorrect types", "[proto
         object.erase(field);
         expect_error([&] { (void)parse(object.dump()); });
     }
-    for (const auto value : {json(nullptr), json(true), json("1"), json(1.0), json::array()}) {
+    for (const auto &value : {json(nullptr), json(true), json("1"), json(1.0), json::array()}) {
         auto object = valid;
         object["version"] = value;
         expect_error([&] { (void)parse(object.dump()); });
     }
     for (const auto field : {"type", "request_id"}) {
-        for (const auto value : {json(nullptr), json(42), json(true), json(""), json::object()}) {
+        for (const auto &value : {json(nullptr), json(42), json(true), json(""), json::object()}) {
             auto object = valid;
             object[field] = value;
             expect_error([&] { (void)parse(object.dump()); });
         }
     }
-    for (const auto value : {json(nullptr), json("text"), json(1), json::array()}) {
+    for (const auto &value : {json(nullptr), json("text"), json(1), json::array()}) {
         auto object = valid;
         object["payload"] = value;
         expect_error([&] { (void)parse(object.dump()); });
@@ -222,7 +222,7 @@ TEST_CASE("All message types validate every required payload field", "[protocol]
             auto wire = json::parse(serialize(message));
             wire["payload"].erase(it.key());
             expect_error([&] { (void)parse(wire.dump()); });
-            for (const auto value :
+            for (const auto &value :
                  {json(nullptr), json(42), json(true), json(""), json::array()}) {
                 auto invalid = message;
                 invalid.payload[it.key()] = value;
@@ -251,7 +251,7 @@ TEST_CASE("Only incoming events have null request identifiers", "[protocol]") {
 }
 
 TEST_CASE("Unsupported integer versions have a distinct error", "[protocol]") {
-    for (const auto version :
+    for (const auto &version :
          {json(0), json(-1), json(2), json(std::numeric_limits<std::uint64_t>::max())}) {
         auto wire = json::parse(serialize(send()));
         wire["version"] = version;
