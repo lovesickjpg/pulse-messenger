@@ -1,6 +1,7 @@
 # Architecture plan
 
-Status: proposed. Only the two application entry points exist at the foundation stage.
+Status: protocol framing and validation are implemented in pulse_protocol.
+The application entry points remain stubs; the remaining components are proposed.
 
 ## Deployment model
 
@@ -8,11 +9,11 @@ One server process owns the database file. Multiple clients communicate with the
 server over a persistent connection. The first release targets a Linux server
 and a CLI client built on Linux and Windows.
 
-## Components to introduce
+## Components
 
 | Component | Responsibility |
 | --- | --- |
-| pulse_protocol | Frame boundaries, request/response types, JSON validation |
+| pulse_protocol (implemented) | Frame boundaries, request/response/event types, JSON validation |
 | pulse_core | Conversations, membership, message and authorization rules |
 | pulse_storage | SQL queries, migrations, transactions |
 | Server transport | Connections, TLS, timers, serialized write queues |
@@ -36,13 +37,14 @@ serialize access to each connection's mutable state.
 
 ## Protocol direction
 
-The proposed framing is a 4-byte unsigned big-endian payload length followed by
-UTF-8 JSON. The first text-only protocol has a proposed 64 KiB payload limit.
-Check the length before allocating the payload buffer.
+The implemented framing is a 4-byte unsigned big-endian payload length followed by
+UTF-8 JSON, with a 64 KiB payload limit. The decoder checks the length before
+allocating the payload buffer and handles partial and combined frames.
 
 Requests use a version, type, request_id, and payload. Message submission also
-uses a client_message_id for deduplication. The full contract belongs in
-docs/protocol.md when protocol work starts.
+uses a client_message_id for future deduplication. The version 1 wire contract is
+documented in [protocol.md](protocol.md). Networking and business operations are
+not yet implemented.
 
 ## Persistence direction
 

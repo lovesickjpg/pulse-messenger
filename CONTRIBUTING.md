@@ -12,19 +12,23 @@
 
 ## Local checks
 
-At the foundation stage:
+Initialize and bootstrap the pinned vcpkg submodule as described in README.md, then run:
 
 ~~~sh
 cmake --preset dev-debug
 cmake --build --preset dev-debug --parallel
+ctest --test-dir build/dev-debug --output-on-failure --no-tests=error
 ~~~
 
 Format changed C++ files with clang-format 18 using the repository configuration.
 The GitHub Actions formatting job checks committed .cpp, .hpp, and .h files.
 
-Once protocol tests are introduced, add their CTest command here and to CI. Tests
-should cover observable behavior and error cases. The initial executable startup
-checks are not a substitute for those tests.
+Protocol tests cover observable behavior and error cases. For Visual Studio
+multi-config builds, pass `-C Debug` to CTest. Executable startup checks are not
+a substitute for protocol tests.
+
+Update vcpkg in a separate PR: change the submodule revision and manifest baseline
+together, and verify GCC, Clang, and MSVC before merging.
 
 ## Code conventions
 

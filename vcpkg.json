@@ -1,0 +1,9 @@
+{
+  "name": "pulse-messenger",
+  "version-string": "0.0.0",
+  "builtin-baseline": "4cb050be2cfa7a947cdd2dd1a70e24b17774c979",
+  "dependencies": [
+    "nlohmann-json",
+    "catch2"
+  ]
+}
