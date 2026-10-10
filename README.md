@@ -5,13 +5,11 @@ clear protocol design, and reproducible builds.
 
 ## Project status
 
-**Protocol stage.** The repository contains a versioned JSON protocol library,
-an incremental frame codec, Catch2 tests, pinned vcpkg dependencies, and CI for
-GCC, Clang, and MSVC. See [the v1 contract](docs/protocol.md).
+**Transport stage.** The server accepts local TCP connections and broadcasts
+messages in a temporary `lobby`. The CLI sends lines and displays incoming
+messages. Both use Boost.Asio and the [v1 frame codec](docs/protocol.md).
 
-The executable stubs print a status message and exit. Networking, authentication,
-chat commands, and message persistence are planned and are not implemented yet.
-The CI result is available in the repository's Actions tab after a workflow run.
+Authentication, TLS, persistent history, and reconnection are still planned.
 
 ## Planned functionality
 
@@ -31,12 +29,12 @@ The CI result is available in the repository's Actions tab after a workflow run.
 | Formatting | clang-format 18 | Configuration and CI check provided |
 | CI | GitHub Actions, GCC / Clang / MSVC | Workflow provided |
 | Dependencies | vcpkg manifest mode | Submodule revision and package baseline pinned |
-| Networking | Boost.Asio, OpenSSL | Planned |
+| Networking | Boost.Asio | Local asynchronous transport implemented; TLS planned |
 | Protocol | Length-prefixed JSON, nlohmann/json | v1 framing and validation implemented |
 | Storage | SQLite, SQLiteCpp | Planned |
 | Password hashing | libsodium / Argon2id | Planned |
 | Logging | spdlog | Planned |
-| Testing | Catch2 v3, CTest | Protocol tests implemented; sanitizers planned |
+| Testing | Catch2 v3, Python 3, CTest | Protocol and transport tests; sanitizers planned |
 
 ## Install dependencies and build
 
@@ -46,6 +44,7 @@ Prerequisites:
 - CMake 3.24 or newer.
 - Ninja.
 - Git and internet access for the initial dependency installation.
+- Python 3 for the transport integration test (unless `BUILD_TESTING=OFF`).
 
 Clone with submodules, or initialize them in an existing clone:
 
@@ -68,7 +67,7 @@ Linux:
 ./external/vcpkg/bootstrap-vcpkg.sh -disableMetrics
 ~~~
 
-CMake installs `nlohmann-json` and `catch2` automatically from `vcpkg.json`.
+CMake installs `nlohmann-json`, `catch2`, and `boost-asio` from `vcpkg.json`.
 The vcpkg gitlink and `builtin-baseline` both pin revision
 `4cb050be2cfa7a947cdd2dd1a70e24b17774c979` (Catch2 3.16.0, nlohmann-json 3.12.0#2).
 Update the revision and baseline together in a separate PR with all platform checks.
@@ -103,7 +102,10 @@ ctest --test-dir build/ci-windows -C Debug --output-on-failure --no-tests=error
 
 Choose the generator matching your installed Visual Studio version.
 
-On Linux, run the stubs:
+## Local demo
+
+Start the server, then open three other terminals and start a client in each.
+On Linux:
 
 ~~~sh
 ./build/dev-debug/bin/pulse-server
@@ -116,6 +118,24 @@ On Windows with the Ninja preset:
 .\build\dev-debug\bin\pulse-server.exe
 .\build\dev-debug\bin\pulse-client.exe
 ~~~
+
+For a Visual Studio build, executables are under `bin/Debug/` instead of `bin/`.
+Each nonempty line sends a message to `lobby`; all connected clients, including
+the sender, see it as `[message_id] text`. `/quit` or EOF flushes queued requests
+and waits for replies before exiting. Ctrl+C stops either application.
+
+Both executables accept an optional port, defaulting to **5555**. The address is
+always **127.0.0.1**. For example, run `pulse-server 6000` and `pulse-client 6000`.
+`pulse-server [port] --run-for 10` stops after ten seconds; integration tests use
+this to exercise shutdown on Windows and Linux. `--help` prints usage.
+
+Each connection has a 1 MiB write queue, a ten-second write deadline, and a
+five-minute read inactivity timeout. A stalled or malformed connection is closed;
+other clients keep running. The CLI has a five-second connection deadline and
+waits at most ten seconds for replies after EOF or `/quit`.
+
+The lobby is a transport demo: messages and IDs last only for this server run.
+There are no accounts, room membership, deduplication, or delivery recovery yet.
 
 For MSVC, configure a Visual Studio toolchain in CLion or use an x64 Native Tools
 Command Prompt. A regular shell may not have the compiler environment configured.
@@ -141,7 +161,10 @@ If the presets are not listed, use Find Action → Load CMake Presets.
 | apps/client-cli/ | Console client entry point |
 | include/pulse/protocol.hpp | Public protocol API |
 | src/protocol/ | JSON validation and incremental frame codec |
+| include/pulse/connection.hpp | Connection API, used on one event-loop thread |
+| src/transport/ | Reads, ordered writes, deadlines, and connection cleanup |
 | tests/protocol/ | Catch2 protocol and framing tests |
+| tests/transport/ | Process-level server and CLI integration scenario |
 | external/vcpkg/ | Pinned dependency manager submodule |
 | vcpkg.json | Manifest and pinned package baseline |
 | docs/protocol.md | Implemented v1 wire contract and examples |
@@ -156,8 +179,10 @@ Domain and storage components will be introduced with their first implementation
 The Catch2 suite checks all four implemented message types and eight error codes,
 byte-at-a-time and combined frames, size boundaries, truncated streams, malformed
 JSON/UTF-8, field validation, version compatibility, and decoder failure/reset.
-CTest discovers and runs individual test cases. CI bootstraps vcpkg and runs these
-tests on GCC, Clang, and MSVC; formatting and stub startup checks also remain.
+The transport scenario starts actual processes and checks three clients, partial
+and combined frames, broken connections, a slow reader, piped CLI input, and
+shutdown with active connections. CTest runs both suites. CI is configured to run
+them on GCC, Clang, and MSVC and check C++ formatting.
 
 ~~~sh
 ctest --test-dir build/dev-debug --output-on-failure --no-tests=error
@@ -166,11 +191,17 @@ ctest --test-dir build/dev-debug --output-on-failure --no-tests=error
 For a Visual Studio build use its build directory and add `-C Debug`. To build
 without test targets, configure with `-DBUILD_TESTING=OFF`.
 
+To run just the transport scenario:
+
+~~~sh
+ctest --test-dir build/dev-debug -R transport-integration --output-on-failure
+~~~
+
 ## Security scope
 
-TLS and authentication are planned. The foundation does not provide a working
-messaging service. End-to-end encryption is outside the first release scope;
-in the planned initial architecture the server processes message contents.
+TLS and authentication are planned. The current demo binds only to loopback and
+is intended for local test data. End-to-end encryption is outside the first
+release scope; the server processes message contents.
 
 ## Contributing
 

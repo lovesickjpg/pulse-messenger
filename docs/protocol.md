@@ -3,7 +3,8 @@
 This document defines the first text wire format and the types implemented by
 `pulse_protocol`. The library serializes and validates messages and incrementally
 decodes frames. It does not send messages over a network, authenticate users,
-store messages, or implement deduplication. The server and client remain stubs.
+store messages, or implement deduplication. The server and CLI use it for the
+local lobby demo described below.
 
 ## Framing and limits
 
@@ -158,8 +159,27 @@ The other codes describe future application behavior.
 Local decoding exceptions are not automatically transmitted as `error` messages.
 Framing failures and truncated streams are transport-level errors. A malformed
 message may have no trustworthy `request_id`; the application must not invent a
-correlation identifier or send an invalid error envelope. Connection handling and
-the policy for replying to valid, correlated requests are future work.
+correlation identifier or send an invalid error envelope. The transport closes a
+connection on decoding failure and logs the reason. Valid requests for a missing
+conversation receive a correlated `not_found` error.
+
+## Temporary lobby
+
+The stage 2 server accepts `message.send` only for `conversation_id: "lobby"`.
+It assigns a process-local `message_id`, queues a `message.send.result` for the
+sender, then broadcasts `message.received` to all connected clients, including
+the sender. Other conversations receive `not_found`. Client-sent response types
+receive `invalid_request`; a client-sent event closes that connection.
+
+An event that would exceed the frame limit is rejected with `invalid_request`
+before broadcasting. Malformed frames close the connection without a reply.
+EOF between frames flushes pending replies before closing; EOF inside a frame
+closes the connection immediately.
+
+Successful results acknowledge this in-memory demo only. They do not promise
+persistence or delivery to a client that disconnects or exceeds its write limit.
+Message IDs restart with the server, and repeated `client_message_id` values are
+not deduplicated yet.
 
 ## Version compatibility
 
