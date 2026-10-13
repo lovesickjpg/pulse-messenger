@@ -47,6 +47,9 @@ Timestamp at(int seconds) { return t0 + std::chrono::seconds(seconds); }
 
 std::vector<std::uint8_t> token(std::uint8_t seed) { return std::vector<std::uint8_t>(32, seed); }
 
+// Opens the database (running migrations) and closes it again
+void create_database(const std::filesystem::path &file) { Database db(file); }
+
 void expect_kind(const std::function<void()> &action, ErrorKind kind) {
     try {
         action();
@@ -98,9 +101,7 @@ TEST_CASE("Opening creates missing parent directories") {
 TEST_CASE("Reopening does not apply a migration twice") {
     TempDir dir;
     std::int64_t first_applied = 0;
-    {
-        Database db(dir.file());
-    }
+    create_database(dir.file());
     {
         SQLite::Database raw(dir.file().string());
         first_applied = raw.execAndGet("SELECT applied_at FROM schema_migrations").getInt64();
@@ -116,9 +117,7 @@ TEST_CASE("Reopening does not apply a migration twice") {
 
 TEST_CASE("A database from a newer build is refused") {
     TempDir dir;
-    {
-        Database db(dir.file());
-    }
+    create_database(dir.file());
     {
         SQLite::Database raw(dir.file().string(), SQLite::OPEN_READWRITE);
         raw.exec("INSERT INTO schema_migrations (version, name, applied_at) "
@@ -531,9 +530,7 @@ TEST_CASE("The worker fails to start on a bad database") {
         REQUIRE_THROWS_AS(DatabaseWorker(context.get_executor(), dir.file("")), StorageError);
     }
     SECTION("newer schema") {
-        {
-            Database db(dir.file());
-        }
+        create_database(dir.file());
         {
             SQLite::Database raw(dir.file().string(), SQLite::OPEN_READWRITE);
             raw.exec("INSERT INTO schema_migrations VALUES (42, '042_future', 0)");
