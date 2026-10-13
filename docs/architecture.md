@@ -1,7 +1,8 @@
 # Architecture plan
 
-Status: protocol framing and validation, local TCP transport, and the CLI lobby
-demo are implemented. Storage and domain components below are proposed.
+Status: protocol framing and validation, local TCP transport, the CLI lobby demo,
+and the storage layer (schema, migrations, database worker) are implemented. The
+network path doesn't use storage yet, and the domain layer is proposed.
 
 ## Deployment model
 
@@ -15,7 +16,7 @@ and a CLI client built on Linux and Windows.
 | --- | --- |
 | pulse_protocol (implemented) | Frame boundaries, request/response/event types, JSON validation |
 | pulse_core | Conversations, membership, message and authorization rules |
-| pulse_storage | SQL queries, migrations, transactions |
+| pulse_storage (implemented) | SQL queries, migrations, transactions, database worker |
 | pulse_transport (implemented) | Connection lifetime, incremental reads, bounded write queues, deadlines |
 | Server (implemented) | Loopback accept, session ownership, temporary lobby broadcast |
 | CLI client (implemented) | Console input, display, connection state, EOF handling |
@@ -43,8 +44,11 @@ The CLI polls stdin every 25 ms on the same event loop. Linux uses `poll` and
 This lets the client exit on disconnect while stdin remains open. EOF and `/quit`
 half-close the socket after flushing requests and keep reading replies.
 
-Run SQLite operations on a dedicated database worker. Run expensive password
-hashing in a bounded worker pool. Return results to the network executor.
+SQLite runs on a dedicated `DatabaseWorker` thread with a bounded job queue; it
+owns the only connection and hands results back to the network executor (see
+[storage.md](storage.md)). Expensive password hashing will use a separate bounded
+worker pool. The server destroys the worker before the `io_context`; `stop()`
+finishes the running job and fails queued ones with `Shutdown`.
 
 Document ownership, shutdown order, pending operations, and error handling before
 adding more network threads. If the network executor becomes multi-threaded,
@@ -63,9 +67,10 @@ temporary lobby; persistent messaging and authorization belong to later stages.
 
 ## Persistence direction
 
-Use versioned SQL migrations and foreign keys. Persist a message and assign its
-conversation sequence in the same transaction. Acknowledge durable acceptance
-only after the transaction commits.
+Versioned SQL migrations and foreign keys are in place. A message and its
+conversation sequence are persisted in the same transaction
+(`Database::append_message`). Acknowledge durable acceptance only after that
+transaction commits; wiring this to the protocol is the messaging stage.
 
 Reconnection should recover history using a server-issued cursor. Specify how
 live events and history overlap, and deduplicate them on the client.

@@ -5,11 +5,17 @@ clear protocol design, and reproducible builds.
 
 ## Project status
 
-**Transport stage.** The server accepts local TCP connections and broadcasts
+**Storage stage.** The server accepts local TCP connections and broadcasts
 messages in a temporary `lobby`. The CLI sends lines and displays incoming
 messages. Both use Boost.Asio and the [v1 frame codec](docs/protocol.md).
 
-Authentication, TLS, persistent history, and reconnection are still planned.
+The storage layer (SQLite schema, migrations, repositories, and a database worker
+thread) is implemented and tested, and `pulse-server --db <file>` opens and
+migrates a database at startup. The network path doesn't read or write it yet, so
+lobby messages are still in-memory. See [docs/storage.md](docs/storage.md).
+
+Authentication, TLS, persistent history over the network, and reconnection are
+still planned.
 
 ## Planned functionality
 
@@ -31,10 +37,10 @@ Authentication, TLS, persistent history, and reconnection are still planned.
 | Dependencies | vcpkg manifest mode | Submodule revision and package baseline pinned |
 | Networking | Boost.Asio | Local asynchronous transport implemented; TLS planned |
 | Protocol | Length-prefixed JSON, nlohmann/json | v1 framing and validation implemented |
-| Storage | SQLite, SQLiteCpp | Planned |
+| Storage | SQLite, SQLiteCpp | Schema, migrations, worker thread implemented; not wired to the network yet |
 | Password hashing | libsodium / Argon2id | Planned |
 | Logging | spdlog | Planned |
-| Testing | Catch2 v3, Python 3, CTest | Protocol and transport tests; sanitizers planned |
+| Testing | Catch2 v3, Python 3, CTest | Protocol, storage, and transport tests; sanitizers planned |
 
 ## Install dependencies and build
 
@@ -67,9 +73,10 @@ Linux:
 ./external/vcpkg/bootstrap-vcpkg.sh -disableMetrics
 ~~~
 
-CMake installs `nlohmann-json`, `catch2`, and `boost-asio` from `vcpkg.json`.
-The vcpkg gitlink and `builtin-baseline` both pin revision
-`4cb050be2cfa7a947cdd2dd1a70e24b17774c979` (Catch2 3.16.0, nlohmann-json 3.12.0#2).
+CMake installs `nlohmann-json`, `catch2`, `boost-asio`, and `sqlitecpp` (which
+pulls in SQLite) from `vcpkg.json`. The vcpkg gitlink and `builtin-baseline` both
+pin revision `4cb050be2cfa7a947cdd2dd1a70e24b17774c979` (Catch2 3.16.0,
+nlohmann-json 3.12.0#2, SQLiteCpp 3.3.3, SQLite 3.53.4).
 Update the revision and baseline together in a separate PR with all platform checks.
 
 Run from the repository root in a shell that can find these tools:
@@ -129,6 +136,11 @@ always **127.0.0.1**. For example, run `pulse-server 6000` and `pulse-client 600
 `pulse-server [port] --run-for 10` stops after ten seconds; integration tests use
 this to exercise shutdown on Windows and Linux. `--help` prints usage.
 
+To keep data between runs, pass a database file: `pulse-server --db data/pulse.db`
+(missing directories are created, migrations are applied, and `/data/` and `*.db`
+are already git-ignored). The server prints `Database ready: ...` or refuses to
+start if the file is unusable or from a newer build.
+
 Each connection has a 1 MiB write queue, a ten-second write deadline, and a
 five-minute read inactivity timeout. A stalled or malformed connection is closed;
 other clients keep running. The CLI has a five-second connection deadline and
@@ -163,25 +175,36 @@ If the presets are not listed, use Find Action → Load CMake Presets.
 | src/protocol/ | JSON validation and incremental frame codec |
 | include/pulse/connection.hpp | Connection API, used on one event-loop thread |
 | src/transport/ | Reads, ordered writes, deadlines, and connection cleanup |
+| include/pulse/storage.hpp | Database API: users, sessions, rooms, messages, history |
+| include/pulse/database_worker.hpp | Dedicated database thread with a bounded queue |
+| src/storage/ | SQLite access, migration runner, worker implementation |
+| migrations/ | Numbered SQL migrations, compiled into `pulse_storage` |
+| tests/storage/ | Catch2 storage and worker tests on temporary databases |
 | tests/protocol/ | Catch2 protocol and framing tests |
 | tests/transport/ | Process-level server and CLI integration scenario |
 | external/vcpkg/ | Pinned dependency manager submodule |
 | vcpkg.json | Manifest and pinned package baseline |
 | docs/protocol.md | Implemented v1 wire contract and examples |
-| docs/architecture.md | Proposed component boundaries |
+| docs/storage.md | Schema, migrations, settings, threading, backups |
+| docs/architecture.md | Component boundaries |
 | docs/roadmap.md | Milestones and completion criteria |
 | .github/workflows/ | Continuous integration |
 
-Domain and storage components will be introduced with their first implementations.
+Domain components will be introduced with their first implementations.
 
 ## Testing
 
 The Catch2 suite checks all four implemented message types and eight error codes,
 byte-at-a-time and combined frames, size boundaries, truncated streams, malformed
 JSON/UTF-8, field validation, version compatibility, and decoder failure/reset.
+The storage suite runs against temporary database files: migrations (fresh,
+repeated, too-new), persistence across reopen, transaction rollback, unique and
+foreign-key constraints, gap-free sequences, history paging, sessions, backups,
+and the worker thread (ordering, bounded queue, shutdown).
 The transport scenario starts actual processes and checks three clients, partial
 and combined frames, broken connections, a slow reader, piped CLI input, and
-shutdown with active connections. CTest runs both suites. CI is configured to run
+shutdown with active connections, plus `--db` startup, restart, and failure
+paths. CTest runs all of it. CI is configured to run
 them on GCC, Clang, and MSVC and check C++ formatting.
 
 ~~~sh
@@ -199,7 +222,8 @@ ctest --test-dir build/dev-debug -R transport-integration --output-on-failure
 
 ## Security scope
 
-TLS and authentication are planned. The current demo binds only to loopback and
+TLS and authentication are planned. The schema stores only password hashes and
+session token hashes; nothing in the server writes them yet. The current demo binds only to loopback and
 is intended for local test data. End-to-end encryption is outside the first
 release scope; the server processes message contents.
 

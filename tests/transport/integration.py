@@ -3,6 +3,7 @@ import json
 import os
 import signal
 import socket
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -62,13 +63,14 @@ def closed(peer):
 
 
 @contextlib.contextmanager
-def server(binary, run_for=None):
+def server(binary, run_for=None, extra_args=()):
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
         port = reservation.getsockname()[1]
     args = [binary, str(port)]
     if run_for is not None:
         args += ["--run-for", str(run_for)]
+    args += list(extra_args)
     with tempfile.TemporaryFile() as log:
         process = subprocess.Popen(args, stdout=log, stderr=log)
         try:
@@ -213,7 +215,65 @@ def test_shutdown(server_binary, client_binary):
     print("shutdown with active connections and open stdin: passed")
 
 
+def schema(path):
+    with contextlib.closing(sqlite3.connect(path)) as db:
+        return db.execute("SELECT version, name, applied_at FROM schema_migrations").fetchall()
+
+
+def test_storage(server_binary):
+    with tempfile.TemporaryDirectory() as directory:
+        database = os.path.join(directory, "nested", "pulse.db")
+
+        # first start creates the file and applies the initial migration
+        with server(server_binary, run_for=1, extra_args=["--db", database]) as (_, process):
+            assert process.wait(timeout=10) == 0
+        first = schema(database)
+        assert [(v, n) for v, n, _ in first] == [(1, "001_initial")], first
+        with contextlib.closing(sqlite3.connect(database)) as db:
+            tables = {row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")}
+            assert {"users", "sessions", "conversations", "conversation_members",
+                    "messages", "schema_migrations"} <= tables, tables
+
+        # restart keeps the data and doesn't re-run the migration
+        with contextlib.closing(sqlite3.connect(database)) as db:
+            db.execute("INSERT INTO users (username, password_hash, created_at) "
+                       "VALUES ('alice', 'test-hash', 0)")
+            db.commit()
+        with server(server_binary, run_for=1, extra_args=["--db", database]) as (_, process):
+            assert process.wait(timeout=10) == 0
+        assert schema(database) == first
+        with contextlib.closing(sqlite3.connect(database)) as db:
+            assert db.execute("SELECT username FROM users").fetchall() == [("alice",)]
+
+        # a database from a newer build must stop the server before it listens
+        with contextlib.closing(sqlite3.connect(database)) as db:
+            db.execute("INSERT INTO schema_migrations VALUES (99, '099_future', 0)")
+            db.commit()
+        completed = subprocess.run([server_binary, "--db", database, "--run-for", "1"],
+                                   capture_output=True, encoding="utf-8", timeout=10)
+        assert completed.returncode == 1, completed.stdout
+        assert "newer" in completed.stderr, completed.stderr
+
+        # a path that can't be a database is a startup error, not a crash
+        blocker = os.path.join(directory, "blocker")
+        with open(blocker, "w") as handle:
+            handle.write("not a directory")
+        completed = subprocess.run([server_binary, "--db", os.path.join(blocker, "pulse.db")],
+                                   capture_output=True, encoding="utf-8", timeout=10)
+        assert completed.returncode == 1, completed.stdout
+        assert completed.stderr.startswith("Server:"), completed.stderr
+
+        # option parsing
+        for bad in (["--db"], ["--bogus", "1"], ["5555", "--run-for"]):
+            completed = subprocess.run([server_binary] + bad, capture_output=True,
+                                       encoding="utf-8", timeout=10)
+            assert completed.returncode == 1 and "Usage" in completed.stderr, bad
+    print("database startup, migrations, restart, bad database, options: passed")
+
+
 if __name__ == "__main__":
     server_binary, client_binary = sys.argv[1:]
     test_network(server_binary, client_binary)
     test_shutdown(server_binary, client_binary)
+    test_storage(server_binary)
