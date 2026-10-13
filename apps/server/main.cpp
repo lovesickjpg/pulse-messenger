@@ -1,10 +1,13 @@
 #include <pulse/connection.hpp>
+#include <pulse/database_worker.hpp>
 
 #include "../arguments.hpp"
 
 #include <chrono>
 #include <csignal>
+#include <filesystem>
 #include <iostream>
+#include <optional>
 #include <unordered_set>
 
 namespace asio = boost::asio;
@@ -120,25 +123,38 @@ class Server {
 
 int main(int argc, char **argv) {
     try {
+        const std::string usage = "Usage: pulse-server [port] [--run-for seconds] [--db file]";
         if (argc == 2 && std::string_view(argv[1]) == "--help") {
-            std::cout << "Usage: pulse-server [port] [--run-for seconds]\n"
-                         "Listens on 127.0.0.1:5555 by default. Ctrl+C stops the server.\n";
+            std::cout << usage
+                      << "\nListens on 127.0.0.1:5555 by default. Ctrl+C stops the server.\n"
+                         "--db opens (and migrates) a SQLite database file at startup.\n";
             return 0;
         }
         unsigned short port = 5555;
         unsigned run_for = 0;
+        std::filesystem::path database_path;
         int argument = 1;
-        if (argument < argc && std::string_view(argv[argument]) != "--run-for") {
+        if (argument < argc && std::string_view(argv[argument]).substr(0, 2) != "--") {
             port = static_cast<unsigned short>(pulse::parse_number(argv[argument++], 65535));
         }
-        if (argument < argc) {
-            if (std::string_view(argv[argument]) != "--run-for" || argument + 2 != argc) {
-                throw std::invalid_argument("Usage: pulse-server [port] [--run-for seconds]");
+        while (argument < argc) {
+            const std::string_view option = argv[argument];
+            if (argument + 1 >= argc) {
+                throw std::invalid_argument(usage);
             }
-            run_for = pulse::parse_number(argv[argument + 1], 86400);
+            if (option == "--run-for") {
+                run_for = pulse::parse_number(argv[argument + 1], 86400);
+            } else if (option == "--db") {
+                database_path = argv[argument + 1];
+            } else {
+                throw std::invalid_argument(usage);
+            }
+            argument += 2;
         }
 
         asio::io_context context;
+        // declared after the context so it goes away first, as the worker requires
+        std::optional<pulse::storage::DatabaseWorker> database;
         Server server(context, port);
         asio::signal_set signals(context, SIGINT, SIGTERM);
         asio::steady_timer deadline(context);
@@ -160,7 +176,22 @@ int main(int argc, char **argv) {
                 }
             });
         }
-        std::cout << std::unitbuf << "Listening on 127.0.0.1:" << port << " (temporary lobby)\n";
+        std::cout << std::unitbuf;
+        if (!database_path.empty()) {
+            // opening migrates the schema; a bad path or newer schema fails right here
+            database.emplace(context.get_executor(), database_path);
+            database->submit([](pulse::storage::Database &db) { return db.schema_version(); },
+                             [&, database_path](pulse::storage::Outcome<int> result) {
+                                 try {
+                                     std::cout << "Database ready: " << database_path.string()
+                                               << " (schema version " << result.get() << ")\n";
+                                 } catch (const std::exception &error) {
+                                     std::cerr << "Database: " << error.what() << '\n';
+                                     stop();
+                                 }
+                             });
+        }
+        std::cout << "Listening on 127.0.0.1:" << port << " (temporary lobby)\n";
         context.run();
         std::cout << "Server stopped\n";
     } catch (const std::exception &error) {

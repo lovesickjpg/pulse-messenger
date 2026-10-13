@@ -53,6 +53,9 @@ These prefixes are a team convention, not a release automation requirement.
 
 ## Documentation
 
+Schema changes go in a new numbered file under `migrations/`; never edit one that
+has shipped. Update docs/storage.md when the schema or connection settings change.
+
 Update the README only when a feature is implemented and verified. Keep planned
 features visibly marked as planned. Changes to the wire format must also update
 docs/protocol.md once it exists.

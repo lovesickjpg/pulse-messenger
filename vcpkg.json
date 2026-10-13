@@ -5,6 +5,7 @@
   "dependencies": [
     "nlohmann-json",
     "catch2",
+    "sqlitecpp",
     {
       "name": "boost-asio",
       "default-features": false
