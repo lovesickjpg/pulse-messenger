@@ -2,9 +2,11 @@
 
 This document defines the first text wire format and the types implemented by
 `pulse_protocol`. The library serializes and validates messages and incrementally
-decodes frames. It does not send messages over a network, authenticate users,
-store messages, or implement deduplication. The server and CLI use it for the
-local lobby demo described below.
+decodes frames. The server and CLI use it for accounts, sessions, and the
+temporary lobby described below.
+
+Frames always travel inside TLS. See [security.md](security.md) for certificate
+checks and the session model.
 
 ## Framing and limits
 
@@ -50,12 +52,23 @@ rules such as text normalization and identifier syntax belong to later stages.
 
 ## Implemented types
 
-| Type | Kind | Required payload fields (all strings) |
+| Type | Kind | Required payload fields |
 | --- | --- | --- |
+| `auth.register` | Client request | `username`, `password` |
+| `auth.register.result` | Successful response | `user_id`, `username` |
+| `auth.login` | Client request | `username`, `password` |
+| `auth.login.result` | Successful response | `user_id`, `username`, `session_token`, `expires_at` |
+| `auth.resume` | Client request | `session_token` |
+| `auth.resume.result` | Successful response | `user_id`, `username`, `expires_at` |
+| `auth.logout` | Client request | none |
+| `auth.logout.result` | Successful response | none |
 | `message.send` | Client request | `conversation_id`, `client_message_id`, `text` |
 | `message.send.result` | Successful response | `conversation_id`, `client_message_id`, `message_id` |
 | `error` | Failed response | `code`, `message` |
-| `message.received` | Server event | `conversation_id`, `client_message_id`, `message_id`, `text` |
+| `message.received` | Server event | `conversation_id`, `client_message_id`, `message_id`, `sender`, `text` |
+
+All fields are strings except `expires_at`, which is a JSON integer: Unix time in
+milliseconds.
 
 The codec verifies these fields and their types. It does not verify that a
 conversation exists, that a user may access it, or that identifiers in a response
@@ -130,10 +143,70 @@ delivery or defining deduplication scope and retention.
     "conversation_id": "42",
     "client_message_id": "attempt-001",
     "message_id": "msg-100",
+    "sender": "alice",
     "text": "Привет!"
   }
 }
 ```
+
+## Accounts and sessions
+
+Every request except `auth.register`, `auth.login`, and `auth.resume` needs a
+signed-in connection; otherwise the reply is `unauthorized`. The server decides
+who sent a request from the connection's session, never from the payload.
+
+Requests on one connection are handled strictly in order. A `message.send` that
+arrives right behind an `auth.login` waits until the login finishes, so clients
+may pipeline them. Up to 32 requests can wait this way; more closes the connection.
+
+### Register
+
+Usernames are 3 to 32 ASCII letters, digits, `_`, `.`, or `-`, starting with a
+letter or digit, and unique ignoring ASCII case. Passwords are 8 to 256 bytes.
+Registering doesn't log you in.
+
+```json
+{"version": 1, "type": "auth.register", "request_id": "r1",
+ "payload": {"username": "alice", "password": "correct horse"}}
+{"version": 1, "type": "auth.register.result", "request_id": "r1",
+ "payload": {"user_id": "7", "username": "alice"}}
+```
+
+Errors: `invalid_request` (rules above), `conflict` (name taken), `rate_limited`
+(server busy hashing).
+
+### Log in
+
+```json
+{"version": 1, "type": "auth.login", "request_id": "r2",
+ "payload": {"username": "ALICE", "password": "correct horse"}}
+{"version": 1, "type": "auth.login.result", "request_id": "r2",
+ "payload": {"user_id": "7", "username": "alice",
+             "session_token": "9f86d081...64 hex chars...", "expires_at": 1760000000000}}
+```
+
+`username` in the result is the stored spelling. A wrong password and an unknown
+user both get `unauthorized` with the same message. Five failures for one
+username within a minute get `rate_limited` until the window slides, even with
+the right password. Logging in again on a signed-in connection switches it to the
+new session.
+
+### Resume
+
+`auth.resume` with a `session_token` signs this connection into an existing,
+unexpired, unrevoked session. The result looks like the login result without the
+token. Anything else gets `unauthorized`.
+
+### Log out
+
+`auth.logout` (empty payload) revokes the current session. Every connection on
+that session is signed out immediately, and the token stops working for
+`auth.resume`.
+
+### Expiry
+
+Sessions expire at `expires_at`. The first request after that gets
+`unauthorized`, and the connection must log in again.
 
 ## Errors
 
@@ -152,9 +225,9 @@ The `error` response's `payload.code` must be one of these values:
 
 `payload.message` is a nonempty, human-readable string, not a stable machine
 identifier. Clients should branch on `code`, not parse `message`. Unknown error
-codes are rejected by the v1 codec. This stage validates all eight codes; only
-`invalid_request` and `unsupported_version` describe local validation failures.
-The other codes describe future application behavior.
+codes are rejected by the v1 codec. The server currently sends `invalid_request`,
+`unauthorized`, `not_found`, `conflict`, `rate_limited`, and `internal_error`;
+`forbidden` arrives with conversations.
 
 Local decoding exceptions are not automatically transmitted as `error` messages.
 Framing failures and truncated streams are transport-level errors. A malformed
@@ -165,11 +238,13 @@ conversation receive a correlated `not_found` error.
 
 ## Temporary lobby
 
-The stage 2 server accepts `message.send` only for `conversation_id: "lobby"`.
-It assigns a process-local `message_id`, queues a `message.send.result` for the
-sender, then broadcasts `message.received` to all connected clients, including
-the sender. Other conversations receive `not_found`. Client-sent response types
-receive `invalid_request`; a client-sent event closes that connection.
+The server accepts `message.send` only for `conversation_id: "lobby"`, and only
+from a signed-in connection. It assigns a process-local `message_id`, queues a
+`message.send.result` for the sender, then broadcasts `message.received` with
+the sender's username to every signed-in connection, including the sender's.
+Connections that aren't signed in get no lobby traffic. Other conversations
+receive `not_found`. Client-sent response types receive `invalid_request`; a
+client-sent event closes that connection.
 
 An event that would exceed the frame limit is rejected with `invalid_request`
 before broadcasting. Malformed frames close the connection without a reply.
@@ -226,7 +301,7 @@ that throws.
 
 ## Verification
 
-The tests in `tests/protocol` cover round trips for all four implemented types and
+The tests in `tests/protocol` cover round trips for every implemented type and
 all eight error codes, byte-at-a-time delivery, several frames in one chunk,
 payloads at the size limit, oversized and zero length headers, truncated headers
 and payloads, malformed JSON and UTF-8, invalid field types, unknown versions and
