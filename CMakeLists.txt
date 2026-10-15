@@ -11,6 +11,8 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(Boost CONFIG REQUIRED COMPONENTS asio)
 find_package(SQLiteCpp CONFIG REQUIRED)
+find_package(OpenSSL REQUIRED)
+find_package(unofficial-sodium CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 include(CTest)
 
@@ -18,11 +20,12 @@ add_library(pulse_protocol src/protocol/protocol.cpp)
 target_include_directories(pulse_protocol PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(pulse_protocol PUBLIC nlohmann_json::nlohmann_json)
 
-add_executable(pulse-server apps/server/main.cpp)
+add_executable(pulse-server apps/server/main.cpp apps/server/server.cpp)
 add_executable(pulse-client apps/client-cli/main.cpp)
-add_library(pulse_transport src/transport/connection.cpp)
+add_library(pulse_transport src/transport/connection.cpp src/transport/tls.cpp)
 target_include_directories(pulse_transport PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(pulse_transport PUBLIC pulse_protocol Boost::asio Threads::Threads)
+target_link_libraries(pulse_transport
+    PUBLIC pulse_protocol Boost::asio OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
 if(WIN32)
     target_compile_definitions(pulse_transport PUBLIC _WIN32_WINNT=0x0A00)
 endif()
@@ -63,8 +66,20 @@ if(WIN32)
     target_compile_definitions(pulse_storage PUBLIC _WIN32_WINNT=0x0A00)
 endif()
 
-target_link_libraries(pulse-server PRIVATE pulse_transport pulse_storage)
+add_library(pulse_auth src/auth/auth.cpp src/auth/password_hasher.cpp)
+target_include_directories(pulse_auth PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(pulse_auth
+    PUBLIC Boost::asio Threads::Threads PRIVATE unofficial-sodium::sodium)
+if(WIN32)
+    target_compile_definitions(pulse_auth PUBLIC _WIN32_WINNT=0x0A00)
+endif()
+
+target_link_libraries(pulse-server PRIVATE pulse_transport pulse_storage pulse_auth)
 target_link_libraries(pulse-client PRIVATE pulse_transport)
+
+# Local CA + localhost certificate for development and the integration tests
+add_executable(pulse-dev-certs tools/dev-certs/main.cpp)
+target_link_libraries(pulse-dev-certs PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 
 if(BUILD_TESTING)
     find_package(Catch2 3 CONFIG REQUIRED)
@@ -75,16 +90,21 @@ if(BUILD_TESTING)
     add_executable(pulse-storage-tests tests/storage/storage_tests.cpp)
     target_link_libraries(pulse-storage-tests PRIVATE pulse_storage SQLiteCpp Catch2::Catch2WithMain)
     catch_discover_tests(pulse-storage-tests)
+    add_executable(pulse-auth-tests tests/auth/auth_tests.cpp)
+    target_link_libraries(pulse-auth-tests PRIVATE pulse_auth Catch2::Catch2WithMain)
+    catch_discover_tests(pulse-auth-tests)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_test(NAME transport-integration
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/transport/integration.py"
-                "$<TARGET_FILE:pulse-server>" "$<TARGET_FILE:pulse-client>")
-    set_tests_properties(transport-integration PROPERTIES TIMEOUT 60)
+                "$<TARGET_FILE:pulse-server>" "$<TARGET_FILE:pulse-client>"
+                "$<TARGET_FILE:pulse-dev-certs>")
+    set_tests_properties(transport-integration PROPERTIES TIMEOUT 180)
 endif()
 
-set(pulse_targets pulse-server pulse-client pulse_protocol pulse_transport pulse_storage)
+set(pulse_targets pulse-server pulse-client pulse-dev-certs pulse_protocol pulse_transport
+    pulse_storage pulse_auth)
 if(BUILD_TESTING)
-    list(APPEND pulse_targets pulse-protocol-tests pulse-storage-tests)
+    list(APPEND pulse_targets pulse-protocol-tests pulse-storage-tests pulse-auth-tests)
 endif()
 foreach(target IN LISTS pulse_targets)
     if(MSVC)

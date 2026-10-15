@@ -32,7 +32,37 @@ std::vector<Message> examples() {
          {{"conversation_id", "42"},
           {"client_message_id", "attempt-001"},
           {"message_id", "99"},
+          {"sender", "alice"},
           {"text", "Привет!"}}}};
+}
+
+std::vector<Message> auth_examples() {
+    const auto token = std::string(64, 'a');
+    return {{1, "auth.register", "req-1", {{"username", "alice"}, {"password", "hunter22"}}},
+            {1, "auth.register.result", "req-1", {{"user_id", "7"}, {"username", "alice"}}},
+            {1, "auth.login", "req-2", {{"username", "alice"}, {"password", "hunter22"}}},
+            {1,
+             "auth.login.result",
+             "req-2",
+             {{"user_id", "7"},
+              {"username", "alice"},
+              {"session_token", token},
+              {"expires_at", 1'700'000'000'000}}},
+            {1, "auth.resume", "req-3", {{"session_token", token}}},
+            {1,
+             "auth.resume.result",
+             "req-3",
+             {{"user_id", "7"}, {"username", "alice"}, {"expires_at", 1'700'000'000'000}}},
+            {1, "auth.logout", "req-4", json::object()},
+            {1, "auth.logout.result", "req-4", json::object()}};
+}
+
+std::vector<Message> all_examples() {
+    auto all = examples();
+    for (auto &message : auth_examples()) {
+        all.push_back(std::move(message));
+    }
+    return all;
 }
 
 void expect_error(const std::function<void()> &action, std::string_view code = "invalid_request") {
@@ -57,7 +87,7 @@ std::vector<std::uint8_t> raw_frame(std::string_view payload) {
 } // namespace
 
 TEST_CASE("Every implemented message type round trips JSON and frames", "[protocol]") {
-    for (const auto &message : examples()) {
+    for (const auto &message : all_examples()) {
         CAPTURE(message.type);
         const auto wire = serialize(message);
         const auto decoded = parse(wire);
@@ -213,7 +243,11 @@ TEST_CASE("Required envelope fields reject missing and incorrect types", "[proto
 }
 
 TEST_CASE("All message types validate every required payload field", "[protocol]") {
-    for (const auto &message : examples()) {
+    const std::vector<json> not_strings{json(nullptr), json(42), json(true), json(""),
+                                        json::array()};
+    const std::vector<json> not_integers{json(nullptr), json("42"), json(true), json(4.2),
+                                         json::array()};
+    for (const auto &message : all_examples()) {
         for (auto it = message.payload.begin(); it != message.payload.end(); ++it) {
             CAPTURE(message.type, it.key());
             auto missing = message;
@@ -222,8 +256,7 @@ TEST_CASE("All message types validate every required payload field", "[protocol]
             auto wire = json::parse(serialize(message));
             wire["payload"].erase(it.key());
             expect_error([&] { (void)parse(wire.dump()); });
-            for (const auto &value :
-                 {json(nullptr), json(42), json(true), json(""), json::array()}) {
+            for (const auto &value : it->is_number_integer() ? not_integers : not_strings) {
                 auto invalid = message;
                 invalid.payload[it.key()] = value;
                 expect_error([&] { (void)serialize(invalid); });
@@ -236,7 +269,7 @@ TEST_CASE("All message types validate every required payload field", "[protocol]
 }
 
 TEST_CASE("Only incoming events have null request identifiers", "[protocol]") {
-    for (auto message : examples()) {
+    for (auto message : all_examples()) {
         auto wire = json::parse(serialize(message));
         if (message.type == "message.received") {
             message.request_id = "req-event";

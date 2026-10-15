@@ -17,6 +17,39 @@ void require_string(const nlohmann::json &object, std::string_view field) {
     }
 }
 
+void require_integer(const nlohmann::json &object, std::string_view field) {
+    const auto it = object.find(std::string(field));
+    if (it == object.end() || !it->is_number_integer()) {
+        invalid(std::string(field) + " must be an integer");
+    }
+}
+
+struct Schema {
+    std::string_view type;
+    std::vector<std::string_view> strings;
+    std::vector<std::string_view> integers = {};
+    bool event = false;
+};
+
+// Every type the codec accepts, and the payload fields it insists on
+const std::vector<Schema> schemas{
+    Schema{"message.send", {"conversation_id", "client_message_id", "text"}},
+    Schema{"message.send.result", {"conversation_id", "client_message_id", "message_id"}},
+    Schema{"message.received",
+           {"conversation_id", "client_message_id", "message_id", "sender", "text"},
+           {},
+           true},
+    Schema{"error", {"code", "message"}},
+    Schema{"auth.register", {"username", "password"}},
+    Schema{"auth.register.result", {"user_id", "username"}},
+    Schema{"auth.login", {"username", "password"}},
+    Schema{"auth.login.result", {"user_id", "username", "session_token"}, {"expires_at"}},
+    Schema{"auth.resume", {"session_token"}},
+    Schema{"auth.resume.result", {"user_id", "username"}, {"expires_at"}},
+    Schema{"auth.logout", {}},
+    Schema{"auth.logout.result", {}},
+};
+
 void validate(const Message &message) {
     if (message.version != current_version) {
         throw ProtocolError("unsupported_version", "Only protocol version 1 is supported");
@@ -24,27 +57,26 @@ void validate(const Message &message) {
     if (!message.payload.is_object()) {
         invalid("payload must be an object");
     }
-    if (message.type == "message.received") {
+    const auto schema = std::find_if(schemas.begin(), schemas.end(),
+                                     [&](const Schema &item) { return item.type == message.type; });
+    if (schema == schemas.end()) {
+        invalid("Unknown message type");
+    }
+    if (schema->event) {
         if (message.request_id) {
             invalid("Events require a null request_id");
         }
     } else if (!message.request_id || message.request_id->empty()) {
         invalid("Requests and responses require a nonempty request_id");
     }
+    for (const auto field : schema->strings) {
+        require_string(message.payload, field);
+    }
+    for (const auto field : schema->integers) {
+        require_integer(message.payload, field);
+    }
 
-    if (message.type == "message.send" || message.type == "message.send.result" ||
-        message.type == "message.received") {
-        require_string(message.payload, "conversation_id");
-        require_string(message.payload, "client_message_id");
-        if (message.type != "message.send") {
-            require_string(message.payload, "message_id");
-        }
-        if (message.type != "message.send.result") {
-            require_string(message.payload, "text");
-        }
-    } else if (message.type == "error") {
-        require_string(message.payload, "code");
-        require_string(message.payload, "message");
+    if (message.type == "error") {
         constexpr std::array codes{"invalid_request", "unsupported_version", "unauthorized",
                                    "forbidden",       "not_found",           "conflict",
                                    "rate_limited",    "internal_error"};
@@ -52,8 +84,6 @@ void validate(const Message &message) {
         if (std::find(codes.begin(), codes.end(), code) == codes.end()) {
             invalid("Unknown error code");
         }
-    } else {
-        invalid("Unknown message type");
     }
 }
 

@@ -33,18 +33,23 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Install autotools for libsodium
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes autoconf autoconf-archive automake libtool pkg-config
       - name: Bootstrap vcpkg
         run: ./external/vcpkg/bootstrap-vcpkg.sh -disableMetrics
       - name: Configure
         run: cmake --fresh --preset dev-debug -DVCPKG_TARGET_TRIPLET=x64-linux
       - name: Build
         run: cmake --build --preset dev-debug --parallel
-      - name: Test protocol and transport
+      - name: Test
         run: ctest --test-dir build/dev-debug --output-on-failure --no-tests=error
       - name: Check CLI arguments
         run: |
           ./build/dev-debug/bin/pulse-server --help
           ./build/dev-debug/bin/pulse-client --help
+          ./build/dev-debug/bin/pulse-dev-certs --help
 
   windows:
     name: windows-msvc
@@ -63,12 +68,14 @@ jobs:
           -DVCPKG_TARGET_TRIPLET=x64-windows
       - name: Build
         run: cmake --build build/ci-windows --config Debug --parallel
-      - name: Test protocol and transport
+      - name: Test
         run: ctest --test-dir build/ci-windows -C Debug --output-on-failure --no-tests=error
       - name: Check server arguments
         run: .\build\ci-windows\bin\Debug\pulse-server.exe --help
       - name: Check client arguments
         run: .\build\ci-windows\bin\Debug\pulse-client.exe --help
+      - name: Check certificate tool arguments
+        run: .\build\ci-windows\bin\Debug\pulse-dev-certs.exe --help
 
   formatting:
     name: formatting
